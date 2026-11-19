@@ -1,0 +1,52 @@
+[project]
+name = "music-platform"
+version = "0.1.0"
+description = "Audio tools for music practice: beat grids, metronome overlays and tempo practice."
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "numpy>=1.26",
+    "librosa>=0.10",
+    "soundfile>=0.12",
+    "pyrubberband>=0.4",
+    # Beat This! and its runtime dependencies
+    "torch>=2.0",
+    "beat-this>=1.0",
+    "einops",
+    "soxr",
+    "rotary-embedding-torch",
+    "tqdm",
+]
+
+[project.scripts]
+music-platform = "music_platform.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/music_platform"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "SIM"]
+
+[tool.mypy]
+strict = true
+python_version = "3.10"
+mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = ["librosa.*", "soundfile.*", "pyrubberband.*", "beat_this.*", "torch.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

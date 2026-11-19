@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Audio and model outputs stay out of git
+data/
+out/
+.music-cache/
+*.wav
+*.mp3
+*.m4a
+*.mid

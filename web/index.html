@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Beat Practice</title>
+<style>
+  :root { --bg:#fafafa; --fg:#1d1d1f; --muted:#6e6e73; --card:#fff; --line:#e5e5ea;
+          --wave:#b8c4d6; --beat:#8e8e93; --down:#e5484d; --head:#0a84ff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111; --fg:#f2f2f7; --muted:#98989d; --card:#1c1c1e; --line:#2c2c2e;
+            --wave:#3a4a63; --beat:#636366; --down:#ff6369; --head:#409cff; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:15px/1.4 -apple-system, system-ui, sans-serif; }
+  main { max-width:900px; margin:0 auto; padding:24px 16px; }
+  h1 { font-size:20px; margin:0 0 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+          padding:16px; margin-bottom:16px; }
+  .row { display:flex; flex-wrap:wrap; gap:12px; align-items:center; }
+  .muted { color:var(--muted); }
+  button { background:var(--head); color:#fff; border:0; border-radius:8px;
+           padding:8px 16px; font:inherit; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--head); border:1px solid var(--line); }
+  button:disabled { opacity:.5; cursor:default; }
+  .stats { display:flex; flex-wrap:wrap; gap:24px; margin-bottom:12px; }
+  .stat b { display:block; font-size:24px; font-variant-numeric:tabular-nums; }
+  .stat span { color:var(--muted); font-size:13px; }
+  canvas { width:100%; height:140px; display:block; border-radius:8px; cursor:pointer; }
+  .legend { color:var(--muted); font-size:13px; margin-top:6px; }
+  .legend i { display:inline-block; width:10px; height:10px; border-radius:2px; margin:0 4px 0 12px; }
+  #pulse { width:14px; height:14px; border-radius:50%; background:var(--line); margin:6px 0 4px; }
+  input[type=range] { flex:1; min-width:180px; }
+  input[type=number] { width:80px; font:inherit; padding:4px 6px; }
+  #time { font-variant-numeric:tabular-nums; }
+  .chordbar { display:flex; align-items:baseline; gap:20px; flex-wrap:wrap; margin:4px 0 12px; }
+  #chordNow { font-size:40px; font-weight:700; min-width:3ch; line-height:1.1; }
+  #chordNext { font-size:22px; color:var(--muted); }
+  #lane { height:34px; margin-top:6px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Beat Practice</h1>
+
+  <div class="card row">
+    <input type="file" id="file" accept="audio/*">
+    <span id="status" class="muted"></span>
+  </div>
+
+  <div id="ui" hidden>
+    <div class="card">
+      <div class="stats">
+        <div class="stat"><b id="origBpm">–</b><span>original BPM</span></div>
+        <div class="stat"><b id="nowBpm">–</b><span>playing BPM</span></div>
+        <div class="stat"><b id="pct">–</b><span>speed</span></div>
+        <div class="stat"><b id="keyNow">0</b><span>semitones</span></div>
+        <div class="stat"><div id="pulse"></div><span>beat</span></div>
+      </div>
+      <div class="chordbar">
+        <div><div class="muted" style="font-size:13px">Now</div><div id="chordNow">–</div></div>
+        <div><div class="muted" style="font-size:13px">Next</div><div id="chordNext">–</div></div>
+        <span style="flex:1"></span>
+        <span class="muted" id="chordInfo"></span>
+      </div>
+      <canvas id="wave"></canvas>
+      <canvas id="lane"></canvas>
+      <div class="legend"><i style="background:var(--beat)"></i>beat<i style="background:var(--down)"></i>downbeat<i style="background:var(--head)"></i>playhead · click to seek</div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <span class="muted">Tempo</span>
+        <input type="range" id="slider" step="1">
+        <input type="number" id="bpmInput" step="1"> <span class="muted">BPM</span>
+        <button class="ghost" id="reset">Reset</button>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <span class="muted">Key</span>
+        <button class="ghost" id="keyDown" title="half step lower">−</button>
+        <b id="keyLabel" style="min-width:150px;text-align:center">original key</b>
+        <button class="ghost" id="keyUp" title="half step higher">+</button>
+        <button class="ghost" id="keyReset">Reset</button>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <button id="play" disabled>▶ Play</button>
+        <span id="time" class="muted">0:00 / 0:00</span>
+        <span id="renderState" class="muted"></span>
+        <span style="flex:1"></span>
+        <button id="download" disabled>⬇ Download</button>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const MIN_SPEED = 0.25, MAX_SPEED = 2.0, MAX_SEMITONES = 12, SETTLE_MS = 500, KEEP_RENDERS = 3;
+
+let file = null, grid = null, peaks = null, duration = 0;
+let wanted = { speed: 1, semitones: 0 }; // what the controls are set to
+let current = null;        // {speed, semitones, url, name} of what the player holds
+let renders = new Map();   // 'speed|semitones' -> {url, name}; in memory only, nothing on disk
+const keyOf = v => `${v.speed}|${v.semitones}`;
+let inflight = null, settleTimer = null;
+let chords = null;         // {key: {tonic, mode}, chords: [{start, end, root, bass, suffix}]}
+const audio = new Audio();
+
+// ---------- load + analyze ----------
+$('file').onchange = async () => {
+  file = $('file').files[0];
+  if (!file) return;
+  audio.pause();
+  audio.removeAttribute('src');
+  for (const r of renders.values()) URL.revokeObjectURL(r.url);
+  renders.clear();
+  current = null;
+  chords = null;
+  $('ui').hidden = true;
+  $('status').textContent = 'Detecting beats…';
+  try {
+    const [res] = await Promise.all([
+      fetch(`/api/beats?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file }),
+      loadPeaks(file),
+    ]);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    grid = data;
+    $('status').textContent = file.name;
+    $('ui').hidden = false;
+    $('origBpm').textContent = grid.bpm.toFixed(1);
+    for (const el of [$('slider'), $('bpmInput')]) {
+      el.min = Math.ceil(grid.bpm * MIN_SPEED);
+      el.max = Math.floor(grid.bpm * MAX_SPEED);
+    }
+    wanted.semitones = 0;
+    setBpm(Math.round(grid.bpm), true);
+    loadChords(file);
+  } catch (e) {
+    $('status').textContent = 'Error: ' + e.message;
+  }
+};
+
+// Chords come after beats (they're snapped to them) and never block the rest of the page.
+async function loadChords(f) {
+  $('chordInfo').textContent = 'Finding chords…';
+  $('chordNow').textContent = $('chordNext').textContent = '–';
+  try {
+    const res = await fetch(`/api/chords?name=${encodeURIComponent(f.name)}`, { method: 'POST', body: f });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    if (f !== file) return; // a different song was picked meanwhile
+    chords = data;
+  } catch (e) {
+    if (f === file) $('chordInfo').textContent = 'Chord detection failed: ' + e.message;
+  }
+}
+
+// ---------- chord naming (mirrors music_platform.chords) ----------
+const SHARPS = ['C','C♯','D','D♯','E','F','F♯','G','G♯','A','A♯','B'];
+const FLATS  = ['C','D♭','D','E♭','E','F','G♭','G','A♭','A','B♭','B'];
+const FLAT_MAJOR_TONICS = new Set([5, 10, 3, 8, 1]);
+const mod12 = n => ((n % 12) + 12) % 12;
+const heardSemitones = () => (current ?? wanted).semitones;
+
+function keyInfo() {
+  const shift = heardSemitones(), k = chords.key;
+  const tonic = mod12(k.tonic + shift);
+  const flats = FLAT_MAJOR_TONICS.has(k.mode === 'major' ? tonic : mod12(tonic + 3));
+  return { flats, name: `${(flats ? FLATS : SHARPS)[tonic]} ${k.mode}` };
+}
+
+function chordLabel(c, flats) {
+  if (c.root === null) return 'N.C.';
+  const names = flats ? FLATS : SHARPS, shift = heardSemitones();
+  let label = names[mod12(c.root + shift)] + c.suffix;
+  if (c.bass !== null) label += '/' + names[mod12(c.bass + shift)];
+  return label;
+}
+
+function chordIndexAt(t) {
+  const list = chords.chords;
+  for (let i = 0; i < list.length; i++) if (t >= list[i].start && t < list[i].end) return i;
+  return t < (list[0]?.start ?? 0) ? -1 : list.length;
+}
+
+async function loadPeaks(f) {
+  const c = new AudioContext();
+  const buf = await c.decodeAudioData(await f.arrayBuffer());
+  c.close();
+  duration = buf.duration;
+  const ch = buf.getChannelData(0), n = 1200, step = Math.floor(ch.length / n);
+  peaks = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    let m = 0;
+    for (let j = i * step; j < (i + 1) * step; j++) m = Math.max(m, Math.abs(ch[j]));
+    peaks[i] = m;
+  }
+}
+
+// ---------- tempo controls: render once the value settles ----------
+function setBpm(bpm, now = false) {
+  bpm = Math.round(Math.min(grid.bpm * MAX_SPEED, Math.max(grid.bpm * MIN_SPEED, Number(bpm) || grid.bpm)));
+  wanted = { ...wanted, speed: bpm / grid.bpm };
+  $('slider').value = bpm;
+  if (document.activeElement !== $('bpmInput')) $('bpmInput').value = bpm;
+  scheduleRender(now);
+}
+
+function setKey(semitones) {
+  wanted = { ...wanted, semitones: Math.max(-MAX_SEMITONES, Math.min(MAX_SEMITONES, semitones)) };
+  scheduleRender(false);
+}
+
+function scheduleRender(now) {
+  clearTimeout(settleTimer);
+  const target = { ...wanted };
+  settleTimer = setTimeout(() => render(target), now ? 0 : SETTLE_MS);
+  updateLabels();
+}
+
+const keyText = n => n === 0 ? 'original key'
+  : `${n > 0 ? '+' : '−'}${Math.abs(n)} semitone${Math.abs(n) === 1 ? '' : 's'} ${n > 0 ? 'higher' : 'lower'}`;
+
+$('slider').oninput = e => setBpm(e.target.value);
+$('bpmInput').onchange = e => setBpm(e.target.value, true);
+$('reset').onclick = () => setBpm(grid.bpm, true);
+$('keyDown').onclick = () => setKey(wanted.semitones - 1);
+$('keyUp').onclick = () => setKey(wanted.semitones + 1);
+$('keyReset').onclick = () => setKey(0);
+
+async function render(target) {
+  const k = keyOf(target);
+  if (current && keyOf(current) === k) { updateLabels(); return; }
+  if (renders.has(k)) { swapTo(target, renders.get(k)); return; }
+
+  inflight?.abort();
+  inflight = new AbortController();
+  $('renderState').textContent = `Rendering ${Math.round(target.speed * grid.bpm)} BPM, ${keyText(target.semitones)}…`;
+  try {
+    const q = `name=${encodeURIComponent(file.name)}&speed=${target.speed}&semitones=${target.semitones}`;
+    const res = await fetch(`/api/render?${q}`,
+                            { method: 'POST', body: file, signal: inflight.signal });
+    if (!res.ok) throw new Error((await res.json()).error);
+    const name = /filename="([^"]+)"/.exec(res.headers.get('Content-Disposition'))?.[1] ?? 'practice.wav';
+    const r = { url: URL.createObjectURL(await res.blob()), name };
+    renders.set(k, r);
+    while (renders.size > KEEP_RENDERS) {
+      const [oldKey, old] = renders.entries().next().value;
+      if (oldKey === k || (current && oldKey === keyOf(current))) break;
+      URL.revokeObjectURL(old.url);
+      renders.delete(oldKey);
+    }
+    if (k === keyOf(wanted)) swapTo(target, r);
+  } catch (e) {
+    if (e.name !== 'AbortError') $('renderState').textContent = 'Render failed: ' + e.message;
+  }
+}
+
+// Switch the player to a new render, keeping the same spot in the song.
+function swapTo(target, r) {
+  const songPos = current ? audio.currentTime * current.speed : 0;
+  const wasPlaying = !audio.paused;
+  const speed = target.speed;
+  current = { ...target, ...r };
+  audio.src = r.url;
+  audio.onloadedmetadata = () => {
+    audio.currentTime = songPos / speed;
+    if (wasPlaying) audio.play();
+    audio.onloadedmetadata = null;
+  };
+  $('play').disabled = $('download').disabled = false;
+  updateLabels();
+}
+
+function updateLabels() {
+  const playing = current ?? wanted;
+  $('nowBpm').textContent = Math.round(playing.speed * grid.bpm);
+  $('pct').textContent = Math.round(playing.speed * 100) + '%';
+  $('keyNow').textContent = (playing.semitones > 0 ? '+' : '') + playing.semitones;
+  $('keyLabel').textContent = keyText(wanted.semitones);
+  $('keyDown').disabled = wanted.semitones <= -MAX_SEMITONES;
+  $('keyUp').disabled = wanted.semitones >= MAX_SEMITONES;
+  const tag = current && current.semitones ? `, ${current.semitones > 0 ? '+' : ''}${current.semitones} st` : '';
+  $('download').textContent = current ? `⬇ Download ${Math.round(current.speed * grid.bpm)} BPM${tag}` : '⬇ Download';
+  if (current && keyOf(current) === keyOf(wanted)) $('renderState').textContent = '';
+}
+
+// ---------- playback ----------
+$('play').onclick = () => (audio.paused ? audio.play() : audio.pause());
+audio.onplay = () => { $('play').textContent = '❚❚ Pause'; };
+audio.onpause = audio.onended = () => { $('play').textContent = '▶ Play'; };
+
+$('wave').onclick = $('lane').onclick = e => {
+  if (!current || !duration) return;
+  const r = e.target.getBoundingClientRect();
+  audio.currentTime = ((e.clientX - r.left) / r.width) * duration / current.speed;
+};
+document.onkeydown = e => {
+  if (e.code === 'Space' && e.target.tagName !== 'INPUT' && current) { e.preventDefault(); $('play').click(); }
+};
+
+// ---------- download: save the exact audio you've been hearing ----------
+$('download').onclick = () => {
+  if (!current) return;
+  Object.assign(document.createElement('a'), { href: current.url, download: current.name }).click();
+};
+
+// ---------- waveform + beat light ----------
+const fmt = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+let lastBeat = -1;
+function draw() {
+  requestAnimationFrame(draw);
+  if (!peaks || !grid || $('ui').hidden) return;
+  const c = $('wave'), dpr = devicePixelRatio || 1;
+  const w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== w * dpr) { c.width = w * dpr; c.height = h * dpr; }
+  const g = c.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+
+  g.fillStyle = css('--wave');
+  const bw = w / peaks.length;
+  peaks.forEach((p, i) => { const ph = p * h * 0.9; g.fillRect(i * bw, (h - ph) / 2, Math.max(bw, 1), ph); });
+
+  const x = t => (t / duration) * w;
+  g.fillStyle = css('--beat');
+  for (const b of grid.beats) g.fillRect(x(b), h * 0.3, 1, h * 0.4);
+  g.fillStyle = css('--down');
+  for (const d of grid.downbeats) g.fillRect(x(d) - 0.5, 0, 2, h);
+
+  const songPos = current ? audio.currentTime * current.speed : 0;
+  drawChords(x, songPos, w);
+  if (!current) return;
+  g.fillStyle = css('--head');
+  g.fillRect(x(songPos) - 1, 0, 2, h);
+  $('time').textContent = `${fmt(audio.currentTime)} / ${fmt(duration / current.speed)}`;
+
+  // Visual only; the audible clicks are mixed into the rendered file.
+  const i = grid.beats.findIndex(b => b > songPos) - 1;
+  if (!audio.paused && i >= 0 && i !== lastBeat && songPos - grid.beats[i] < 0.1) {
+    lastBeat = i;
+    const down = grid.downbeats.some(d => Math.abs(d - grid.beats[i]) < 0.02);
+    $('pulse').style.background = down ? css('--down') : css('--head');
+    setTimeout(() => $('pulse').style.background = '', 90);
+  }
+}
+requestAnimationFrame(draw);
+
+// Chord lane under the waveform, plus the big Now / Next readout.
+function drawChords(x, songPos, w) {
+  const c = $('lane'), dpr = devicePixelRatio || 1, h = c.clientHeight;
+  if (c.width !== w * dpr) { c.width = w * dpr; c.height = h * dpr; }
+  const g = c.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  if (!chords) return;
+
+  const { flats, name } = keyInfo();
+  $('chordInfo').textContent = `Key: ${name}`;
+  const list = chords.chords, now = chordIndexAt(songPos);
+  g.font = '600 12px -apple-system, system-ui, sans-serif';
+  g.textBaseline = 'middle';
+  list.forEach((ch, i) => {
+    const x0 = x(ch.start), x1 = x(ch.end);
+    if (ch.root === null) return;
+    g.fillStyle = i === now ? css('--head') : (i % 2 ? css('--line') : css('--wave'));
+    g.fillRect(x0 + 0.5, 2, Math.max(x1 - x0 - 1, 1), h - 4);
+    const label = chordLabel(ch, flats);
+    if (g.measureText(label).width + 6 < x1 - x0) {
+      g.fillStyle = i === now ? '#fff' : css('--fg');
+      g.fillText(label, x0 + 4, h / 2);
+    }
+  });
+  if (current) {
+    g.fillStyle = css('--head');
+    g.fillRect(x(songPos) - 1, 0, 2, h);
+  }
+
+  const nowChord = list[now], nextChord = list.slice(Math.max(now + 1, 0)).find(c => c.root !== null);
+  $('chordNow').textContent = nowChord ? chordLabel(nowChord, flats) : '–';
+  $('chordNext').textContent = nextChord ? chordLabel(nextChord, flats) : '–';
+}
+</script>
+</body>
+</html>

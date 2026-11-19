@@ -1,10 +1,13 @@
+import shutil
 from pathlib import Path
 
 import numpy as np
+import pytest
 import soundfile as sf
 
 from music_platform.beats import BeatGrid
-from music_platform.pipeline import beat_grid_for, render_metronome_tracks
+from music_platform.chords import ChordTrack
+from music_platform.pipeline import beat_grid_for, chord_track_for, render_metronome_tracks
 
 SR = 22050
 
@@ -50,3 +53,38 @@ def test_renders_one_track_per_speed(tmp_path: Path) -> None:
     audio, rate = sf.read(str(tracks[0].path))
     assert rate == SR
     assert len(audio) == 2 * SR
+
+
+@pytest.mark.skipif(shutil.which("rubberband") is None, reason="rubberband CLI not installed")
+def test_transposed_track_is_tagged_and_keeps_length(tmp_path: Path) -> None:
+    song = write_song(tmp_path / "song.wav")
+    [track] = render_metronome_tracks(
+        song, [1.0], tmp_path / "out", tmp_path / "cache", detector=FakeDetector(), semitones=-2
+    )
+
+    assert track.path.name == "song_metronome_100pct_-2st.wav"
+    assert track.semitones == -2
+    audio, _ = sf.read(str(track.path))
+    assert len(audio) == 2 * SR
+
+
+class FakeChordDetector:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, path: Path) -> ChordTrack:
+        self.calls += 1
+        return ChordTrack.from_labels([(0.0, 1.0, "C:maj7"), (1.0, 2.0, "G:7/3")])
+
+
+def test_chord_track_is_cached_by_file_contents(tmp_path: Path) -> None:
+    song = write_song(tmp_path / "song.wav")
+    detector = FakeChordDetector()
+
+    first = chord_track_for(song, tmp_path / "cache", detector=detector)
+    second = chord_track_for(song, tmp_path / "cache", detector=detector)
+    assert detector.calls == 1
+    assert first == second
+
+    chord_track_for(song, tmp_path / "cache", refresh=True, detector=detector)
+    assert detector.calls == 2
